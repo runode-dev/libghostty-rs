@@ -1874,7 +1874,9 @@ pub mod OscCommandType {
     pub const KITTY_DESKTOP_NOTIFICATION: Type = 26;
     #[doc = " An OSC sequence whose number the parser does not implement. Read it\n with the GHOSTTY_OSC_DATA_UNKNOWN_* data types.\n\n Only produced when GHOSTTY_OSC_OPT_UNKNOWN_MAX_BYTES is nonzero.\n Otherwise these sequences are GHOSTTY_OSC_COMMAND_INVALID."]
     pub const UNKNOWN: Type = 27;
-    #[doc = " An OSC sequence whose number the parser does not implement. Read it\n with the GHOSTTY_OSC_DATA_UNKNOWN_* data types.\n\n Only produced when GHOSTTY_OSC_OPT_UNKNOWN_MAX_BYTES is nonzero.\n Otherwise these sequences are GHOSTTY_OSC_COMMAND_INVALID."]
+    #[doc = " A program status report or support query (OSC 7501), which a program\n sends to say what it is doing, such as working or waiting on the user.\n\n The OSC parser only identifies this command. To receive the report's\n contents, use a terminal with GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS\n instead (see GhosttyTerminalProgramStatus)."]
+    pub const PROGRAM_STATUS: Type = 28;
+    #[doc = " A program status report or support query (OSC 7501), which a program\n sends to say what it is doing, such as working or waiting on the user.\n\n The OSC parser only identifies this command. To receive the report's\n contents, use a terminal with GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS\n instead (see GhosttyTerminalProgramStatus)."]
     pub const TYPE_MAX_VALUE: Type = 2147483647;
 }
 pub mod OscTerminator {
@@ -2331,7 +2333,9 @@ pub mod TerminalScrollViewportTag {
     pub const DELTA: Type = 2;
     #[doc = " Scroll to an absolute row offset from the top of the scrollable\n area. Row 0 is the top of the scrollback and the requested row\n becomes the first visible row of the viewport. The value is\n clamped so the viewport never scrolls beyond the top of the\n active area. If the terminal has no scrollback (e.g. the\n alternate screen is active), the viewport always remains on the\n active area.\n\n This is the same row space as the offset field of\n GhosttyTerminalScrollbar, so a scrollbar position obtained from\n GHOSTTY_TERMINAL_DATA_SCROLLBAR round-trips cleanly."]
     pub const ROW: Type = 3;
-    #[doc = " Scroll to an absolute row offset from the top of the scrollable\n area. Row 0 is the top of the scrollback and the requested row\n becomes the first visible row of the viewport. The value is\n clamped so the viewport never scrolls beyond the top of the\n active area. If the terminal has no scrollback (e.g. the\n alternate screen is active), the viewport always remains on the\n active area.\n\n This is the same row space as the offset field of\n GhosttyTerminalScrollbar, so a scrollbar position obtained from\n GHOSTTY_TERMINAL_DATA_SCROLLBAR round-trips cleanly."]
+    #[doc = " Scroll by a number of prompts relative to the viewport top. Negative\n values move backward and positive values move forward. Requires semantic\n prompt markers from the shell. Zero or no matching prompt is a no-op.\n If fewer prompts remain than requested, move to the last matching prompt,\n clamped to the active area.\n\n Moving forward through a final prompt continuation can snap to the active\n area even when there is no newer prompt."]
+    pub const DELTA_PROMPT: Type = 4;
+    #[doc = " Scroll by a number of prompts relative to the viewport top. Negative\n values move backward and positive values move forward. Requires semantic\n prompt markers from the shell. Zero or no matching prompt is a no-op.\n If fewer prompts remain than requested, move to the last matching prompt,\n clamped to the active area.\n\n Moving forward through a final prompt continuation can snap to the active\n area even when there is no newer prompt."]
     pub const MAX_VALUE: Type = 2147483647;
 }
 #[doc = " Scroll viewport value.\n"]
@@ -2342,6 +2346,8 @@ pub union TerminalScrollViewportValue {
     pub delta: isize,
     #[doc = " Absolute row offset (only used with GHOSTTY_SCROLL_VIEWPORT_ROW)."]
     pub row: usize,
+    #[doc = " Prompt delta (only used with GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT)."]
+    pub delta_prompt: isize,
     #[doc = " Padding for ABI compatibility. Do not use."]
     pub _padding: [u64; 2usize],
 }
@@ -2355,6 +2361,8 @@ const _: () = {
         [::std::mem::offset_of!(TerminalScrollViewportValue, delta) - 0usize];
     ["Offset of field: TerminalScrollViewportValue::row"]
         [::std::mem::offset_of!(TerminalScrollViewportValue, row) - 0usize];
+    ["Offset of field: TerminalScrollViewportValue::delta_prompt"]
+        [::std::mem::offset_of!(TerminalScrollViewportValue, delta_prompt) - 0usize];
     ["Offset of field: TerminalScrollViewportValue::_padding"]
         [::std::mem::offset_of!(TerminalScrollViewportValue, _padding) - 0usize];
 };
@@ -3030,6 +3038,98 @@ pub type TerminalProgressReportFn = ::std::option::Option<
         report: *const TerminalProgressReport,
     ),
 >;
+pub mod ProgramStatusState {
+    #[doc = " What a program says it is doing, in a program status report (OSC 7501).\n\n See GhosttyTerminalProgramStatus for an overview of the protocol.\n"]
+    pub type Type = ::std::os::raw::c_int;
+    #[doc = " At rest, waiting for the user's next instruction. For example, an\n interactive tool sitting at its own prompt."]
+    pub const IDLE: Type = 0;
+    #[doc = " Running on its own. The report may include a progress percentage."]
+    pub const WORKING: Type = 1;
+    #[doc = " Finished a piece of work, and the result is ready for the user to\n look at."]
+    pub const DONE: Type = 2;
+    #[doc = " Can't continue until the user does something. `kind` says what the\n program needs and `message` says why. The report may include a\n progress percentage."]
+    pub const BLOCKED: Type = 3;
+    #[doc = " Failed and stopped."]
+    pub const ERROR: Type = 4;
+    #[doc = " Not a real state. Remove the record with this report's id and every\n record beneath it. If the id is empty, remove every record."]
+    pub const CLEAR: Type = 5;
+    #[doc = " Not a real state. Remove the record with this report's id and every\n record beneath it. If the id is empty, remove every record."]
+    pub const MAX_VALUE: Type = 2147483647;
+}
+pub mod ProgramStatusKind {
+    #[doc = " What a blocked program needs from the user, in a program status report\n (OSC 7501).\n"]
+    pub type Type = ::std::os::raw::c_int;
+    #[doc = " The program didn't say, or the state isn't\n GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED."]
+    pub const NONE: Type = 0;
+    #[doc = " Approval to do something, such as \"Apply these changes?\"."]
+    pub const PERMISSION: Type = 1;
+    #[doc = " An answer the user has to type."]
+    pub const QUESTION: Type = 2;
+    #[doc = " A login, password, token, or other credential."]
+    pub const AUTH: Type = 3;
+    #[doc = " A login, password, token, or other credential."]
+    pub const MAX_VALUE: Type = 2147483647;
+}
+#[doc = " A program status report (OSC 7501).\n\n The program status protocol lets a program tell the terminal what it is\n doing: idle, working, done, waiting on the user, or failed, and why. It\n is meant for long-running work like builds, deploys, and coding agents,\n where the user is often looking at something else and wants to know when\n the work finishes or needs them. The protocol only describes state. How\n to show it, if at all, is up to your application.\n\n The full specification is at\n https://www.superlogical.com/rex/docs/build/program-status\n\n For example, a program waiting for the user to approve a change sends\n this, where ST is the string terminator (ESC \\ or BEL):\n\n ESC ] 7501 ; state=blocked:kind=permission:app=terraform:msg=QXBwbHk/ ST\n\n The callback then receives a report with:\n\n - `state`: GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED\n - `kind`: GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION\n - `progress`: -1, because the program didn't send one, so the work is\n   indeterminate\n - `id`: empty, because this is the root record\n - `app`: \"terraform\"\n - `title`: empty\n - `message`: \"Apply?\", decoded from the base64 in `msg`\n\n Only reports that pass every check in the specification reach the\n callback. Text that the program didn't send is an empty string (len=0),\n never NULL. All strings are only valid during the callback, so copy any\n you want to keep.\n\n This is a sized struct. Later versions may add fields at the end, and\n `size` tells you which fields are present. Every field below has been\n present since this struct was introduced.\n"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct TerminalProgramStatus {
+    #[doc = " Size of this struct in bytes."]
+    pub size: usize,
+    #[doc = " What the program is doing."]
+    pub state: ProgramStatusState::Type,
+    #[doc = " What the program needs from the user. Only set for\n GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED. It is\n GHOSTTY_PROGRAM_STATUS_KIND_NONE for other states, when the program\n didn't say, or when it sent a kind this version doesn't know."]
+    pub kind: ProgramStatusKind::Type,
+    #[doc = " How far along the work is, from 0 through 100, or -1 when there is\n no percentage. Only set for GHOSTTY_PROGRAM_STATUS_STATE_WORKING and\n GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED. For those states, -1 means the\n work is indeterminate: the program is busy but has no percentage to\n report. It is also -1 for other states and when the program sent a\n value outside that range."]
+    pub progress: i8,
+    #[doc = " Which record this report is about. Empty for the root record.\n\n A program that only reports on itself leaves this empty. A program\n that reports on several things at once gives each its own id, such as\n \"us-east\" and \"eu-west\" for a deploy to two regions. A \"/\" makes one\n record the child of another, so \"build/test\" is a child of \"build\".\n The parent record doesn't have to exist."]
+    pub id: String,
+    #[doc = " A stable name for the program that a machine can match on, such as\n \"cargo\", \"terraform\", or \"claude-code\". Use it as a key for grouping,\n filtering, or choosing an icon. It is not a label. The label is\n `title`. Empty when the report didn't include one. See\n GhosttyTerminalProgramStatusFn for how an empty app is filled in from\n a parent record."]
+    pub app: String,
+    #[doc = " A short label for the record, meant for people. Programs that report\n several records use this to tell them apart."]
+    pub title: String,
+    #[doc = " One line of text for people, saying what the record is doing,\n waiting for, or has finished. You may shorten it to fit, but don't\n try to read meaning into it."]
+    pub message: String,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of TerminalProgramStatus"][::std::mem::size_of::<TerminalProgramStatus>() - 88usize];
+    ["Alignment of TerminalProgramStatus"]
+        [::std::mem::align_of::<TerminalProgramStatus>() - 8usize];
+    ["Offset of field: TerminalProgramStatus::size"]
+        [::std::mem::offset_of!(TerminalProgramStatus, size) - 0usize];
+    ["Offset of field: TerminalProgramStatus::state"]
+        [::std::mem::offset_of!(TerminalProgramStatus, state) - 8usize];
+    ["Offset of field: TerminalProgramStatus::kind"]
+        [::std::mem::offset_of!(TerminalProgramStatus, kind) - 12usize];
+    ["Offset of field: TerminalProgramStatus::progress"]
+        [::std::mem::offset_of!(TerminalProgramStatus, progress) - 16usize];
+    ["Offset of field: TerminalProgramStatus::id"]
+        [::std::mem::offset_of!(TerminalProgramStatus, id) - 24usize];
+    ["Offset of field: TerminalProgramStatus::app"]
+        [::std::mem::offset_of!(TerminalProgramStatus, app) - 40usize];
+    ["Offset of field: TerminalProgramStatus::title"]
+        [::std::mem::offset_of!(TerminalProgramStatus, title) - 56usize];
+    ["Offset of field: TerminalProgramStatus::message"]
+        [::std::mem::offset_of!(TerminalProgramStatus, message) - 72usize];
+};
+impl Default for TerminalProgramStatus {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[doc = " Callback function type for program status reports (OSC 7501).\n\n Called synchronously each time the running program sends a valid\n report. See GhosttyTerminalProgramStatus for what a report contains.\n\n The terminal doesn't store reports, so your application keeps them. To\n follow the specification, keep one record per id. A report with an empty\n id is about the root record, the program itself. The records follow\n these rules:\n\n - A report replaces its record completely. A value the report leaves\n   out is gone from the record afterwards. It doesn't keep its old value.\n - A GHOSTTY_PROGRAM_STATUS_STATE_CLEAR report removes the record with\n   its id and every record beneath it, so clearing \"build\" also removes\n   \"build/test\". A clear report with an empty id removes every record.\n - A record without an app takes it from its nearest ancestor that has\n   one. If the root record has app \"deploy\" and the record \"us-east\"\n   has none, show \"us-east\" with app \"deploy\" too.\n - When a new shell prompt starts (GHOSTTY_SEMANTIC_PROMPT_PROMPT_START\n   from the GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT callback) or the program\n   running in the terminal exits, remove `working` and `blocked` records.\n   You may remove `idle` records too. Keep `done` and `error` records\n   until the user has seen them, for example until they next focus the\n   terminal.\n - Keep at most 256 records, and allow at least 64. When a new record\n   would go over your limit, remove the one that was updated longest ago.\n\n A full reset (RIS, `ESC c`) removes every record. When that happens,\n the terminal calls this with a GHOSTTY_PROGRAM_STATUS_STATE_CLEAR report\n and an empty id, and then calls the GHOSTTY_TERMINAL_OPT_RESET callback.\n\n `title` and `message` are already decoded and contain no control\n characters, but they are still untrusted text from the program. Don't\n treat them as markup. If you show them outside the terminal, such as in\n a tab or a notification, remove invisible formatting characters like\n text direction overrides, and say which terminal the text came from so\n a program can't pretend to be one running elsewhere.\n\n Example, where `Records`, `records_clear`, and `records_put` stand in for\n your application's own storage:\n\n void on_program_status(GhosttyTerminal terminal,\n                        void* userdata,\n                        const GhosttyTerminalProgramStatus* report) {\n   (void)terminal;\n   Records* records = userdata;\n\n   if (report->state == GHOSTTY_PROGRAM_STATUS_STATE_CLEAR) {\n     // Remove this record and every record beneath it. An empty id\n     // removes every record.\n     records_clear(records, report->id);\n     return;\n   }\n\n   // Replace the whole record. The strings are only valid during this\n   // call, so records_put must copy them.\n   records_put(records, report->id, report->state, report->message);\n }\n\n // Set write_pty too, so programs that check for support get a reply.\n ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_USERDATA, records);\n ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY,\n                      (const void*)on_write_pty);\n ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS,\n                      (const void*)on_program_status);\n\n               call.\n"]
+pub type TerminalProgramStatusFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: Terminal,
+        userdata: *mut ::std::os::raw::c_void,
+        report: *const TerminalProgramStatus,
+    ),
+>;
 pub mod SemanticPromptKind {
     #[doc = " The step of a command that a shell integration event reports.\n\n More kinds may be added in later versions, so ignore any kind you don't\n handle.\n"]
     pub type Type = ::std::os::raw::c_int;
@@ -3116,7 +3216,7 @@ pub type TerminalSemanticPromptFn = ::std::option::Option<
         event: *const TerminalSemanticPrompt,
     ),
 >;
-#[doc = " Callback function type for reset.\n\n Called when the running program performs a full reset (RIS, `ESC c`).\n A full reset clears the screen and scrollback, returns modes to their\n defaults, and clears the title and working directory. Use this callback\n to reset any state your application keeps about what's running in the\n terminal, such as the current command.\n\n The terminal has already reset itself when this is called. The\n GHOSTTY_TERMINAL_OPT_TITLE_CHANGED and GHOSTTY_TERMINAL_OPT_PWD_CHANGED\n callbacks are not called for the cleared title and working directory,\n so update anything you show for them here. A full reset also removes\n any progress report. If you set GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT,\n that callback is called before this one.\n\n A soft reset (DECSTR, `CSI ! p`) only resets a few modes and doesn't\n call this.\n\n"]
+#[doc = " Callback function type for reset.\n\n Called when the running program performs a full reset (RIS, `ESC c`).\n A full reset clears the screen and scrollback, returns modes to their\n defaults, and clears the title and working directory. Use this callback\n to reset any state your application keeps about what's running in the\n terminal, such as the current command.\n\n The terminal has already reset itself when this is called. The\n GHOSTTY_TERMINAL_OPT_TITLE_CHANGED and GHOSTTY_TERMINAL_OPT_PWD_CHANGED\n callbacks are not called for the cleared title and working directory,\n so update anything you show for them here. A full reset also removes\n any progress report and program status records. If you set\n GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT or\n GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS, those callbacks are called before\n this one.\n\n A soft reset (DECSTR, `CSI ! p`) keeps the screen, title and working\n directory, and doesn't call this.\n\n"]
 pub type TerminalResetFn = ::std::option::Option<
     unsafe extern "C" fn(terminal: Terminal, userdata: *mut ::std::os::raw::c_void),
 >;
@@ -3260,9 +3360,9 @@ pub mod TerminalOption {
     pub const CONTINUATION_MAX_BYTES: Type = 31;
     #[doc = " Enable window title reports in response to CSI 21 t.\n\n This is disabled by default because a running program can set a title and\n query it back into the pty input stream, potentially injecting commands\n that execute after user interaction. Passing NULL or a pointer to false\n disables title reporting.\n\n Input type: bool*"]
     pub const TITLE_REPORT: Type = 32;
-    #[doc = " Set the reset default for a terminal mode.\n\n This unconditionally updates both the current value and the value restored\n by a full terminal reset (RIS).\n\n Some recognized modes represent transitions or mirror additional terminal\n state and cannot safely be configured as reset defaults. Those modes return\n GHOSTTY_INVALID_VALUE. A NULL value pointer also returns\n GHOSTTY_INVALID_VALUE.\n\n Input type: GhosttyTerminalModeConfig*"]
+    #[doc = " Set the reset default for a terminal mode.\n\n This unconditionally updates both the current value and the value restored\n by a terminal reset. RIS restores every mode, and DECSTR only a subset.\n\n Some recognized modes represent transitions or mirror additional terminal\n state and cannot safely be configured as reset defaults. Those modes return\n GHOSTTY_INVALID_VALUE. A NULL value pointer also returns\n GHOSTTY_INVALID_VALUE.\n\n Input type: GhosttyTerminalModeConfig*"]
     pub const MODE_DEFAULT: Type = 33;
-    #[doc = " Set the current value of a terminal mode.\n\n This does not change the value restored by a full terminal reset (RIS).\n A NULL value pointer or unknown mode returns GHOSTTY_INVALID_VALUE.\n\n Input type: GhosttyTerminalModeConfig*"]
+    #[doc = " Set the current value of a terminal mode.\n\n This does not change the value restored by a reset (RIS or DECSTR).\n A NULL value pointer or unknown mode returns GHOSTTY_INVALID_VALUE.\n\n Input type: GhosttyTerminalModeConfig*"]
     pub const MODE: Type = 34;
     #[doc = " Callback for escape sequences that libghostty-vt does not implement.\n Set to NULL to stop receiving them.\n\n GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES must also be set, or the\n callback is never called. See the Unsupported Sequences section of the\n terminal documentation for an example.\n\n Input type: GhosttyTerminalUnknownSequenceFn"]
     pub const UNKNOWN_SEQUENCE: Type = 35;
@@ -3282,7 +3382,13 @@ pub mod TerminalOption {
     pub const SEMANTIC_PROMPT: Type = 42;
     #[doc = " Callback invoked after the running program performs a full reset\n (RIS, ESC c). Set to NULL to ignore resets.\n\n Input type: GhosttyTerminalResetFn"]
     pub const RESET: Type = 43;
-    #[doc = " Callback invoked after the running program performs a full reset\n (RIS, ESC c). Set to NULL to ignore resets.\n\n Input type: GhosttyTerminalResetFn"]
+    #[doc = " Enable checksum reports in response to DECRQCRA (CSI Pi ; Pg ; Pt ; Pl ;\n Pb ; Pr * y).\n\n This is disabled by default because a running program can checksum the\n screen one cell at a time and so read back everything on it, including\n output from other programs. Passing NULL or a pointer to false disables\n checksum reporting.\n\n While this is disabled, XTCHECKSUM (CSI Ps # y), which changes how the\n checksum is calculated, is ignored as well.\n\n Input type: bool*"]
+    pub const XT_CHECKSUM_REPORT: Type = 44;
+    #[doc = " Set how the DECRQCRA checksum is calculated after a reset (RIS or DECSTR).\n This also changes the current calculation.\n\n The value holds the same bits as XTCHECKSUM (CSI Ps # y) and xterm's\n checksumExtension resource, which a running program can still use to\n change the calculation until the next reset:\n\n   - 1: don't negate the result\n   - 2: don't add the video attributes of each cell\n   - 4: don't omit blanks\n   - 8: count cells that were never written to as spaces\n   - 16: use full codepoints instead of the DEC 8-bit values\n\n Zero, or passing NULL, is the calculation of a real DEC terminal.\n Values above 31 return GHOSTTY_INVALID_VALUE.\n\n Input type: uint8_t*"]
+    pub const XT_CHECKSUM_EXTENSION: Type = 45;
+    #[doc = " Callback invoked when the running program sends a program status\n report via OSC 7501. Set to NULL to ignore these reports.\n\n Programs may ask whether the terminal supports the protocol by\n sending `OSC 7501 ; ?`. While this callback is set, the terminal\n answers through GHOSTTY_TERMINAL_OPT_WRITE_PTY with `?` followed by\n the states and kinds it accepts:\n\n program:  ESC ] 7501 ; ? ST\n terminal: ESC ] 7501 ; ?:states=idle,working,done,blocked,error:kinds=permission,question,auth ST\n\n While this callback is NULL, the query gets no reply, so a program\n that asks sees the protocol as unsupported. Asking is optional, so\n programs may send reports anyway. Those are dropped. Set a write_pty\n callback too, or programs never see the reply.\n\n Input type: GhosttyTerminalProgramStatusFn"]
+    pub const PROGRAM_STATUS: Type = 46;
+    #[doc = " Callback invoked when the running program sends a program status\n report via OSC 7501. Set to NULL to ignore these reports.\n\n Programs may ask whether the terminal supports the protocol by\n sending `OSC 7501 ; ?`. While this callback is set, the terminal\n answers through GHOSTTY_TERMINAL_OPT_WRITE_PTY with `?` followed by\n the states and kinds it accepts:\n\n program:  ESC ] 7501 ; ? ST\n terminal: ESC ] 7501 ; ?:states=idle,working,done,blocked,error:kinds=permission,question,auth ST\n\n While this callback is NULL, the query gets no reply, so a program\n that asks sees the protocol as unsupported. Asking is optional, so\n programs may send reports anyway. Those are dropped. Set a write_pty\n callback too, or programs never see the reply.\n\n Input type: GhosttyTerminalProgramStatusFn"]
     pub const MAX_VALUE: Type = 2147483647;
 }
 pub mod TerminalData {
@@ -3448,7 +3554,7 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Scroll the terminal viewport.\n\n Scrolls the terminal's viewport according to the given behavior.\n When using GHOSTTY_SCROLL_VIEWPORT_DELTA, set the delta field in\n the value union to specify the number of rows to scroll (negative\n for up, positive for down). When using GHOSTTY_SCROLL_VIEWPORT_ROW,\n set the row field to the absolute row offset from the top of the\n scrollable area (the same row space as the offset field of\n GhosttyTerminalScrollbar). For other behaviors, the value is ignored.\n\n"]
+    #[doc = " Scroll the terminal viewport.\n\n Scrolls the terminal's viewport according to the given behavior.\n When using GHOSTTY_SCROLL_VIEWPORT_DELTA, set the delta field in\n the value union to specify the number of rows to scroll (negative\n for up, positive for down). When using GHOSTTY_SCROLL_VIEWPORT_ROW,\n set the row field to the absolute row offset from the top of the\n scrollable area (the same row space as the offset field of\n GhosttyTerminalScrollbar). When using\n GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT, set delta_prompt to the signed\n number of prompts to move. See GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT for\n the navigation behavior. For other behaviors, the value is ignored.\n\n"]
     pub fn ghostty_terminal_scroll_viewport(terminal: Terminal, behavior: TerminalScrollViewport);
 }
 unsafe extern "C" {
@@ -4340,7 +4446,7 @@ unsafe extern "C" {
     #[doc = " Get the value from an SGR attribute.\n\n This function returns a pointer to the value union from an SGR attribute. Use\n the tag to determine which field of the union is valid. Primarily useful in\n WebAssembly environments where accessing struct fields directly is difficult.\n\n"]
     pub fn ghostty_sgr_attribute_value(attr: *mut SgrAttribute) -> *mut SgrAttributeValue;
 }
-#[doc = " Result of decoding an image.\n\n The `data` buffer must be allocated through the allocator provided to\n the decode callback. The library takes ownership and will free it\n with the same allocator."]
+#[doc = " A decoded image, filled in by a decode callback such as\n GhosttySysDecodePngFn.\n\n Pixels are 8-bit RGBA: four bytes per pixel, stored row by row starting\n at the top-left corner, with no padding between rows. A complete image\n is therefore `width * height * 4` bytes long.\n\n The pixel buffer must be allocated with the allocator passed to the\n decode callback. When the callback returns true, the library takes\n ownership of the buffer and frees it with that same allocator."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SysImage {
@@ -4348,9 +4454,9 @@ pub struct SysImage {
     pub width: u32,
     #[doc = " Image height in pixels."]
     pub height: u32,
-    #[doc = " Pointer to the decoded RGBA pixel data."]
+    #[doc = " The decoded RGBA pixels, allocated with the allocator passed to\n the decode callback."]
     pub data: *mut u8,
-    #[doc = " Length of the pixel data in bytes."]
+    #[doc = " Length of `data` in bytes. This must be the exact size that was\n requested from the allocator, because the library uses it to free\n the buffer."]
     pub data_len: usize,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
@@ -4391,7 +4497,7 @@ pub type SysLogFn = ::std::option::Option<
         message_len: usize,
     ),
 >;
-#[doc = " Callback type for PNG decoding.\n\n Decodes raw PNG data into RGBA pixels. The output pixel data must be\n allocated through the provided allocator. The library takes ownership\n of the buffer and will free it with the same allocator.\n"]
+#[doc = " Callback type for PNG decoding.\n\n The library calls this when it receives a PNG image and needs the raw\n pixels. The callback decodes the PNG bytes in @p data and describes\n the result in @p out. See the example in the @ref sys overview for a\n complete callback.\n\n ### On success\n\n Allocate the pixel buffer with ghostty_alloc() and @p allocator, write\n the decoded pixels into it, set all four fields of @p out, and return\n true. The library then owns the buffer and frees it with the same\n allocator. See GhosttySysImage for the expected pixel layout.\n\n The allocator limits how much memory a single image may use, so\n ghostty_alloc() can return NULL for very large images. Treat that as\n a failure.\n\n ### On failure\n\n Free anything that was allocated and return false. The library does\n not read @p out in this case, and the image is rejected.\n\n ### The output struct starts zeroed\n\n The library sets every field of @p out to zero before it calls the\n callback. This has two practical effects:\n\n - If the callback returns true but `data` is still NULL, the library\n   treats the call as a failure.\n - Language bindings can store a pointer into @p out directly. Some\n   runtimes, such as Go, require memory to be initialized before a\n   pointer is written into it, and this guarantee satisfies that\n   requirement.\n\n Only @p out is zeroed. Memory returned by ghostty_alloc() is not.\n\n callback.\n\n                  call, and filled in by the callback on success.\n         false on failure"]
 pub type SysDecodePngFn = ::std::option::Option<
     unsafe extern "C" fn(
         userdata: *mut ::std::os::raw::c_void,
