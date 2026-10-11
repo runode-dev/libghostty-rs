@@ -94,7 +94,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
-    println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
+    // Cargo resolves this path relative to the package directory. A path that
+    // doesn't exist there makes Cargo rerun the script, and so rebuild
+    // libghostty-vt, on every build.
+    println!("cargo:rerun-if-changed=build.rs");
 
     // An explicit source override should stay authoritative even when the
     // pkg-config feature is enabled, so local Ghostty checkouts remain easy to
@@ -130,6 +133,19 @@ fn build_vendored(link_mode: LinkMode, target: &str) {
                 "GHOSTTY_SOURCE_DIR does not contain build.zig: {}",
                 p.display()
             );
+            // Rebuild when the local checkout changes. Watch only the build
+            // inputs, not the whole directory: zig writes .zig-cache and
+            // zig-pkg into it, which would trigger a rebuild every time.
+            for input in [
+                "build.zig",
+                "build.zig.zon",
+                "src",
+                "pkg",
+                "include",
+                "vendor",
+            ] {
+                println!("cargo:rerun-if-changed={}", p.join(input).display());
+            }
             p
         }
         Err(_) => fetch_ghostty(&out_dir),
