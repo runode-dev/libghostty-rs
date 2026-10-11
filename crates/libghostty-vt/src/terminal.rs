@@ -593,6 +593,23 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(CompressionActivity(value))
     }
 
+    /// The memory this terminal holds right now. See [`MemoryUsage`].
+    ///
+    /// This doesn't decompress scrollback, but it does walk every page, so
+    /// don't read it after every write.
+    pub fn memory_usage(&self) -> Result<MemoryUsage> {
+        let mut raw = ffi::sized!(ffi::TerminalMemoryUsage);
+        let result = unsafe {
+            ffi::ghostty_terminal_get(
+                self.inner.as_raw(),
+                Data::MEMORY_USAGE,
+                (&raw mut raw).cast(),
+            )
+        };
+        from_result(result)?;
+        Ok(MemoryUsage::from(raw))
+    }
+
     /// The configured maximum retained VT continuation size in bytes.
     ///
     /// A value of zero means continuation tracking is disabled. This reports
@@ -1695,6 +1712,89 @@ pub enum CompressionResult {
 /// direction have the same meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompressionActivity(u64);
+
+/// Memory held by a terminal, returned by [`Terminal::memory_usage`].
+///
+/// Most of a terminal's memory goes to its screen contents and scrollback,
+/// which are stored in fixed-size blocks called pages. Resident bytes are the
+/// physical memory pages use right now, and are the figure to budget against.
+/// Virtual bytes are the address space reserved for pages. Compressing
+/// scrollback lowers the resident figure but not the virtual one, because
+/// each page's space stays reserved for decompression.
+///
+/// Each screen has its own set of fields. The primary screen holds shell
+/// output and all of the scrollback. The alternate screen is used by
+/// full-screen programs such as text editors, and its fields are all zero
+/// until a program first switches to it. Add the two sets together for the
+/// terminal's total.
+///
+/// Everything the terminal displays, including colors, styles and
+/// hyperlinks, is stored inside pages, so those are already part of the page
+/// figures. Images are stored separately and have their own fields. Small
+/// structures outside of pages, such as the window title, are not counted.
+///
+/// On macOS, the operating system takes back memory freed by compression
+/// lazily, so the process RSS can be higher than the resident figures here
+/// until it does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemoryUsage {
+    /// Whether compressing scrollback can free memory on this platform. When
+    /// false, [`Terminal::compress`] returns [`CompressionResult::Unsupported`]
+    /// and the compressed fields are always zero.
+    pub compression_supported: bool,
+    /// Number of pages in the primary screen, including compressed pages.
+    pub primary_pages: u64,
+    /// Bytes of address space reserved for the primary screen's pages,
+    /// including compressed pages and spare pages kept ready for reuse.
+    /// Always at least `primary_resident_bytes`.
+    pub primary_virtual_bytes: u64,
+    /// Bytes of physical memory used by the primary screen's pages. A
+    /// compressed page counts only its compressed size. Use this figure for
+    /// memory budgets.
+    pub primary_resident_bytes: u64,
+    /// Number of the primary screen's pages that are compressed.
+    pub primary_compressed_pages: u64,
+    /// Bytes of compressed data held for the primary screen, already included
+    /// in `primary_resident_bytes`.
+    pub primary_compressed_bytes: u64,
+    /// Bytes of image data stored for the primary screen through the Kitty
+    /// graphics protocol, not included in `primary_resident_bytes`. Always
+    /// zero without the `kitty-graphics` feature.
+    pub primary_image_bytes: u64,
+    /// The same as `primary_pages`, for the alternate screen.
+    pub alternate_pages: u64,
+    /// The same as `primary_virtual_bytes`, for the alternate screen.
+    pub alternate_virtual_bytes: u64,
+    /// The same as `primary_resident_bytes`, for the alternate screen.
+    pub alternate_resident_bytes: u64,
+    /// The same as `primary_compressed_pages`, for the alternate screen.
+    pub alternate_compressed_pages: u64,
+    /// The same as `primary_compressed_bytes`, for the alternate screen.
+    pub alternate_compressed_bytes: u64,
+    /// The same as `primary_image_bytes`, for the alternate screen.
+    pub alternate_image_bytes: u64,
+}
+
+impl From<ffi::TerminalMemoryUsage> for MemoryUsage {
+    fn from(raw: ffi::TerminalMemoryUsage) -> Self {
+        Self {
+            compression_supported: raw.compression_supported,
+            primary_pages: raw.primary_pages,
+            primary_virtual_bytes: raw.primary_virtual_bytes,
+            primary_resident_bytes: raw.primary_resident_bytes,
+            primary_compressed_pages: raw.primary_compressed_pages,
+            primary_compressed_bytes: raw.primary_compressed_bytes,
+            primary_image_bytes: raw.primary_image_bytes,
+            alternate_pages: raw.alternate_pages,
+            alternate_virtual_bytes: raw.alternate_virtual_bytes,
+            alternate_resident_bytes: raw.alternate_resident_bytes,
+            alternate_compressed_pages: raw.alternate_compressed_pages,
+            alternate_compressed_bytes: raw.alternate_compressed_bytes,
+            alternate_image_bytes: raw.alternate_image_bytes,
+        }
+    }
+}
 
 /// A synchronous request to write clipboard contents.
 ///
@@ -3178,6 +3278,27 @@ mod tests {
         // The alternate screen never counts as a prompt.
         terminal.vt_write(b"\x1b[?1049h");
         assert!(!terminal.is_cursor_at_prompt().unwrap());
+    }
+
+    #[test]
+    fn memory_usage_reports_pages_per_screen() {
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        let before = terminal.memory_usage().unwrap();
+        assert!(before.primary_pages >= 1);
+        assert!(before.primary_resident_bytes > 0);
+        assert!(before.primary_virtual_bytes >= before.primary_resident_bytes);
+        // The alternate screen hasn't been used yet, so its fields are zero.
+        assert_eq!(before.alternate_pages, 0);
+
+        // Enough scrollback to need more pages.
+        for i in 0..5_000 {
+            terminal.vt_write(format!("line {i}\r\n").as_bytes());
+        }
+        let after = terminal.memory_usage().unwrap();
+        assert!(after.primary_pages > before.primary_pages);
+
+        terminal.vt_write(b"\x1b[?1049h");
+        assert!(terminal.memory_usage().unwrap().alternate_pages >= 1);
     }
 
     #[test]
