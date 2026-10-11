@@ -2804,6 +2804,31 @@ handlers! {
         func(term);
     }
 
+    /// Call the given function when the running program performs a full
+    /// reset (RIS, `ESC c`).
+    ///
+    /// A full reset clears the screen and scrollback, returns modes to their
+    /// defaults, and clears the title and working directory. The terminal has
+    /// already reset itself when this is called. Use it to reset any state
+    /// you keep about what's running in the terminal, such as the current
+    /// command.
+    ///
+    /// [`on_title_changed`](Self::on_title_changed) and
+    /// [`on_pwd_changed`](Self::on_pwd_changed) are *not* called for the
+    /// cleared title and working directory, so anything shown for them must
+    /// be updated here instead.
+    ///
+    /// Only a reset from the VT stream is reported here. [`Terminal::reset`]
+    /// and a soft reset (DECSTR, `CSI ! p`) are not.
+    pub fn on_reset(
+        &mut self,
+        tag = RESET,
+        from = TerminalResetFn(),
+        to = ResetFn(),
+    ) |term, func| {
+        func(term);
+    }
+
     /// Call the given function in response to XTWINOPS size queries
     /// (CSI 14/16/18 t) and when VT input enables in-band size reports (mode
     /// 2048). Return the current terminal geometry, or `None` to suppress the
@@ -3864,6 +3889,43 @@ mod tests {
         terminal.vt_write(b"\x1b]7;file://localhost/tmp/other\x1b\\");
         assert_eq!(callback_count.get(), 2);
         assert_eq!(*captured_pwd.borrow(), "file://localhost/tmp/other");
+    }
+
+    /// RIS clears the title without calling `on_title_changed`, so
+    /// `on_reset` is the only signal an embedder showing the title gets.
+    /// The API reset is the embedder's own doing and is not reported.
+    #[test]
+    fn reset_callback_reports_ris_but_not_api_reset() {
+        let resets: Cell<usize> = Cell::new(0);
+        let title_changes: Cell<usize> = Cell::new(0);
+        let title_seen_in_reset: RefCell<Option<String>> = RefCell::new(None);
+
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_title_changed(|_| title_changes.set(title_changes.get() + 1))
+            .expect("title callback should register")
+            .on_reset(|term| {
+                resets.set(resets.get() + 1);
+                let title = term
+                    .title()
+                    .expect("title() should succeed inside callback");
+                *title_seen_in_reset.borrow_mut() = Some(title.to_owned());
+            })
+            .expect("reset callback should register");
+
+        terminal.vt_write(b"\x1b]2;before reset\x1b\\");
+        assert_eq!(title_changes.get(), 1);
+
+        terminal.vt_write(b"\x1bc");
+        assert_eq!(resets.get(), 1);
+        // The terminal has already reset when the callback runs.
+        assert_eq!(title_seen_in_reset.borrow().as_deref(), Some(""));
+        assert_eq!(title_changes.get(), 1, "RIS must not report a title change");
+
+        // A soft reset (DECSTR) and the API reset are not reported.
+        terminal.vt_write(b"\x1b[!p");
+        terminal.reset();
+        assert_eq!(resets.get(), 1);
     }
 
     #[test]
