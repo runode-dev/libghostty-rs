@@ -6,8 +6,8 @@ use crate::{
     alloc::{Allocator, Object},
     error::{Error, Result, from_optional_result, from_result},
     ffi,
-    screen::{Cell, Row},
-    style::{RgbColor, Style},
+    screen::{Cell, CellWide, Row},
+    style::{RgbColor, Style, StyleColor},
     terminal::Terminal,
 };
 
@@ -1209,6 +1209,144 @@ impl CellIteration<'_, '_> {
     pub fn has_styling(&self) -> Result<bool> {
         self.get(ffi::RenderStateRowCellsData::HAS_STYLING)
     }
+
+    /// Read everything a renderer usually needs for the current cell, and
+    /// replace the contents of `text` with its grapheme cluster encoded as
+    /// UTF-8.
+    ///
+    /// The result is the same as calling [`raw_cell`](Self::raw_cell),
+    /// `raw_cell().wide()`, [`graphemes_len`](Self::graphemes_len),
+    /// [`graphemes_utf8`](Self::graphemes_utf8),
+    /// [`has_styling`](Self::has_styling), [`style`](Self::style),
+    /// [`fg_color`](Self::fg_color) and [`bg_color`](Self::bg_color) in turn,
+    /// but it usually takes a single call into libghostty for all the cell
+    /// fields instead of one call each. Render loops visit every cell of
+    /// every dirty row, so the saved calls add up.
+    ///
+    /// `palette` must be the palette of the same snapshot, i.e. the
+    /// [`Colors::palette`] returned by [`Snapshot::colors`], which only needs
+    /// to be read once per frame. The foreground color is resolved through it
+    /// on the Rust side, exactly as libghostty resolves it: no styling means
+    /// no foreground color, otherwise the style's foreground color looked up
+    /// in the palette. That avoids reading the foreground from libghostty,
+    /// which fails when it is absent and would end the batched read early.
+    /// Passing another palette only yields wrong colors.
+    ///
+    /// Like [`graphemes_utf8`](Self::graphemes_utf8), `text`'s allocation is
+    /// reused and only grows if the cluster does not fit, which costs one
+    /// extra call. On error, `text` is left empty.
+    pub fn read(&self, palette: &[RgbColor; 256], text: &mut String) -> Result<RenderCell> {
+        use ffi::RenderStateRowCellsData as D;
+
+        // The background color may be absent, in which case libghostty
+        // reports INVALID_VALUE and stops the batch there, so it goes last
+        // and nothing is left to read after it. The grapheme buffer may be
+        // too small, so it goes right before the background color, and the
+        // read resumes from it after growing the buffer.
+        const TAGS: [ffi::RenderStateRowCellsData::Type; 6] = [
+            D::RAW,
+            D::HAS_STYLING,
+            D::STYLE,
+            D::GRAPHEMES_LEN,
+            D::GRAPHEMES_UTF8,
+            D::BG_COLOR,
+        ];
+        const UTF8: usize = 4;
+        const BG: usize = 5;
+
+        // libghostty writes from the start of the buffer, so start empty.
+        text.clear();
+        // SAFETY: The length is only ever set, on success, to what libghostty
+        // reports having written, and it has then encoded every codepoint of
+        // the cluster as UTF-8, so the string stays valid UTF-8. See
+        // `graphemes_utf8` for the failure case.
+        let bytes = unsafe { text.as_mut_vec() };
+        // Most cells hold one ASCII character. Reserve a little so the first
+        // call usually succeeds.
+        bytes.reserve(16);
+
+        let mut raw: ffi::Cell = 0;
+        let mut has_styling = false;
+        let mut style = ffi::sized!(ffi::Style);
+        // The C API writes a uint32_t here.
+        let mut graphemes_len: u32 = 0;
+        let mut buf = ffi::Buffer {
+            ptr: bytes.as_mut_ptr(),
+            cap: bytes.capacity(),
+            len: 0,
+        };
+        let mut bg = ffi::ColorRgb::default();
+        let mut values: [*mut std::ffi::c_void; 6] = [
+            (&raw mut raw).cast(),
+            (&raw mut has_styling).cast(),
+            (&raw mut style).cast(),
+            (&raw mut graphemes_len).cast(),
+            (&raw mut buf).cast(),
+            (&raw mut bg).cast(),
+        ];
+
+        let mut bg_present = true;
+        let mut start = 0;
+        loop {
+            let mut written = 0usize;
+            // SAFETY: Each value points to storage of the type its tag
+            // expects, and both slices have the same length.
+            let result = unsafe {
+                ffi::ghostty_render_state_row_cells_get_multi(
+                    self.iter.0.as_raw(),
+                    TAGS.len() - start,
+                    TAGS[start..].as_ptr(),
+                    values[start..].as_mut_ptr(),
+                    &raw mut written,
+                )
+            };
+            if result == ffi::Result::SUCCESS {
+                break;
+            }
+            match (start + written, result) {
+                // The cluster doesn't fit: libghostty stored the size it needs
+                // in `buf.len` and wrote nothing to the buffer. Grow it and
+                // resume from there.
+                (UTF8, ffi::Result::OUT_OF_SPACE) => {
+                    bytes.reserve(buf.len);
+                    buf.ptr = bytes.as_mut_ptr();
+                    buf.cap = bytes.capacity();
+                    buf.len = 0;
+                    start = UTF8;
+                }
+                // No background color, matching `bg_color` returning `None`.
+                (BG, ffi::Result::INVALID_VALUE) => {
+                    bg_present = false;
+                    break;
+                }
+                (_, ffi::Result::OUT_OF_MEMORY) => return Err(Error::OutOfMemory),
+                _ => return Err(Error::InvalidValue),
+            }
+        }
+        // SAFETY: On success libghostty wrote `buf.len <= cap` bytes.
+        unsafe { bytes.set_len(buf.len) };
+
+        let raw = Cell(raw);
+        let style = Style::try_from(style)?;
+        let fg_color = if has_styling {
+            match style.fg_color {
+                StyleColor::None => None,
+                StyleColor::Palette(index) => Some(palette[usize::from(index.0)]),
+                StyleColor::Rgb(rgb) => Some(rgb),
+            }
+        } else {
+            None
+        };
+        Ok(RenderCell {
+            raw,
+            wide: raw.wide()?,
+            graphemes_len: graphemes_len as usize,
+            has_styling,
+            style,
+            fg_color,
+            bg_color: bg_present.then(|| bg.into()),
+        })
+    }
 }
 
 //---------------------------
@@ -1239,6 +1377,29 @@ pub struct Cursor {
     pub password_input: bool,
     /// The visual style of the cursor.
     pub visual_style: CursorVisualStyle,
+}
+
+/// Everything a renderer usually needs for one cell, as returned by
+/// [`CellIteration::read`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderCell {
+    /// The raw cell value. See [`CellIteration::raw_cell`].
+    pub raw: Cell,
+    /// The cell width, i.e. `raw.wide()`.
+    pub wide: CellWide,
+    /// The number of grapheme codepoints including the base codepoint, or 0
+    /// if the cell has no text. See [`CellIteration::graphemes_len`].
+    pub graphemes_len: usize,
+    /// Whether the cell has any explicit styling. See
+    /// [`CellIteration::has_styling`].
+    pub has_styling: bool,
+    /// The cell style, which is the default style without explicit styling.
+    /// See [`CellIteration::style`].
+    pub style: Style,
+    /// The resolved foreground color. See [`CellIteration::fg_color`].
+    pub fg_color: Option<RgbColor>,
+    /// The resolved background color. See [`CellIteration::bg_color`].
+    pub bg_color: Option<RgbColor>,
 }
 
 /// The [identity](RenderState#row-identity) of a row across render state
@@ -1574,5 +1735,95 @@ mod tests {
         cell_iteration.next().unwrap();
         cell_iteration.graphemes_utf8(&mut text).unwrap();
         assert_eq!(text, "");
+    }
+
+    /// A screen with many kinds of cells: plain text, palette and RGB
+    /// foregrounds and backgrounds, inverse, wide and combining characters,
+    /// cells erased with a background color, a palette entry changed with
+    /// OSC 4, and a cluster too long for the space `read` reserves.
+    fn varied_terminal() -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(12, 6).unwrap();
+        terminal.vt_write(b"plain \x1b[31mred\x1b[0m\r\n");
+        terminal.vt_write(b"\x1b[38;2;1;2;3mrgb\x1b[48;2;4;5;6mbg\x1b[0m\x1b[7minv\x1b[0m\r\n");
+        terminal.vt_write("\x1b[1;42m中e\u{301}\x1b[0m👍🏽\r\n".as_bytes());
+        // Erasing with a background color leaves cells that only have one.
+        terminal.vt_write(b"\x1b[44m\x1b[K\x1b[0m\r\n");
+        terminal.vt_write(b"\x1b[45m\x1b[K\x1b[48;5;200m\x1b[K\x1b[0m\r\n");
+        // The foreground must be resolved through the changed palette entry.
+        terminal.vt_write(b"\x1b]4;1;rgb:12/34/56\x07\x1b[31mosc4\x1b[0m");
+        // "x" and ten combining accents: 21 bytes, more than `read` reserves.
+        terminal.vt_write(format!(" x{}", "\u{301}".repeat(10)).as_bytes());
+        terminal
+    }
+
+    /// Read what `read` should return through the individual getters.
+    fn read_by_getters(cell: &CellIteration<'_, '_>) -> (RenderCell, String) {
+        let raw = cell.raw_cell().unwrap();
+        let mut text = String::new();
+        cell.graphemes_utf8(&mut text).unwrap();
+        (
+            RenderCell {
+                raw,
+                wide: raw.wide().unwrap(),
+                graphemes_len: cell.graphemes_len().unwrap(),
+                has_styling: cell.has_styling().unwrap(),
+                style: cell.style().unwrap(),
+                fg_color: cell.fg_color().unwrap(),
+                bg_color: cell.bg_color().unwrap(),
+            },
+            text,
+        )
+    }
+
+    #[test]
+    fn read_matches_individual_getters() {
+        let terminal = varied_terminal();
+        let mut state = RenderState::new().unwrap();
+        let snapshot = state.update(&terminal).unwrap();
+        let palette = snapshot.colors().unwrap().palette;
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let mut row_iteration = rows.update(&snapshot).unwrap();
+        let mut text = String::new();
+        let mut seen = Vec::new();
+        while let Some(row) = row_iteration.next() {
+            let mut cell_iteration = cells.update(row).unwrap();
+            while let Some(cell) = cell_iteration.next() {
+                // Drop the buffer's capacity before each cell, so the long
+                // cluster takes the grow-and-resume path.
+                text.shrink_to(0);
+                let read = cell.read(&palette, &mut text).unwrap();
+                let (expected, expected_text) = read_by_getters(cell);
+                assert_eq!(read, expected);
+                assert_eq!(text, expected_text);
+                seen.push((read.wide, read.fg_color, read.bg_color, text.clone()));
+            }
+        }
+
+        // Make sure the sample covers the cases it is meant to.
+        let rgb = |r, g, b| Some(RgbColor { r, g, b });
+        assert!(seen.iter().any(|c| c.0 == CellWide::Wide && c.3 == "中"));
+        assert!(seen.iter().any(|c| c.0 == CellWide::SpacerTail));
+        assert!(seen.iter().any(|c| c.3 == "e\u{301}"));
+        assert!(seen.iter().any(|c| c.3.len() == 21));
+        // Whether the skin tone joins the cluster depends on mode 2027, so
+        // only require the emoji itself.
+        assert!(seen.iter().any(|c| c.3.starts_with('👍')));
+        assert!(seen.iter().any(|c| c.1 == rgb(1, 2, 3)));
+        assert!(seen.iter().any(|c| c.2 == rgb(4, 5, 6)));
+        assert!(
+            seen.iter()
+                .any(|c| c.1 == rgb(0x12, 0x34, 0x56) && c.3 == "o")
+        );
+        // Cells with only a background color: no text, no style.
+        assert!(
+            seen.iter()
+                .any(|c| c.3.is_empty() && c.2 == Some(palette[4]))
+        );
+        assert!(
+            seen.iter()
+                .any(|c| c.3.is_empty() && c.2 == Some(palette[200]))
+        );
+        assert!(seen.iter().any(|c| c.1.is_none() && c.2.is_none()));
     }
 }
