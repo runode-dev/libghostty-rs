@@ -1390,6 +1390,8 @@ impl Mode {
     pub const REVERSE_WRAP: Self = Self::new(45, ModeKind::Dec);
     pub const ALT_SCREEN_LEGACY: Self = Self::new(47, ModeKind::Dec);
     pub const KEYPAD_KEYS: Self = Self::new(66, ModeKind::Dec);
+    /// Backarrow key mode (DECBKM).
+    pub const BACKARROW_KEY_MODE: Self = Self::new(67, ModeKind::Dec);
     pub const LEFT_RIGHT_MARGIN: Self = Self::new(69, ModeKind::Dec);
     pub const NORMAL_MOUSE: Self = Self::new(1000, ModeKind::Dec);
     pub const BUTTON_MOUSE: Self = Self::new(1002, ModeKind::Dec);
@@ -3176,6 +3178,16 @@ mod tests {
         // The alternate screen never counts as a prompt.
         terminal.vt_write(b"\x1b[?1049h");
         assert!(!terminal.is_cursor_at_prompt().unwrap());
+    }
+
+    #[test]
+    fn backarrow_key_mode_follows_decbkm() {
+        let mut terminal = Terminal::new(8, 2).expect("terminal should initialize");
+        assert!(!terminal.mode(Mode::BACKARROW_KEY_MODE).unwrap());
+        terminal.vt_write(b"\x1b[?67h");
+        assert!(terminal.mode(Mode::BACKARROW_KEY_MODE).unwrap());
+        terminal.vt_write(b"\x1b[?67l");
+        assert!(!terminal.mode(Mode::BACKARROW_KEY_MODE).unwrap());
     }
 
     #[test]
