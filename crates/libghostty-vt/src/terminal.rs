@@ -2392,6 +2392,104 @@ pub enum ProgressState {
     Pause = ffi::TerminalProgressState::PAUSE,
 }
 
+/// A step of a command reported by shell integration (OSC 133), received by
+/// the [`Terminal::on_semantic_prompt`] callback.
+///
+/// Each command goes through four steps, in this order: the prompt starts,
+/// input starts, output starts, and the command ends. Then the next prompt
+/// starts. Shells differ in what they report. Many don't send the command
+/// line or the exit code, some skip steps, and a shell may start the same
+/// prompt more than once (e.g. when it redraws the prompt after a resize),
+/// so handle each event on its own instead of expecting a strict order.
+///
+/// The strings are only valid during the callback. Copy them if you need
+/// them later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SemanticPrompt<'t> {
+    /// The shell started drawing a prompt (OSC 133;A and friends).
+    PromptStart {
+        /// Which prompt is starting.
+        kind: PromptKind,
+    },
+    /// The prompt is drawn and the user can type a command (OSC 133;B).
+    InputStart,
+    /// The user submitted the command and it starts running. Everything the
+    /// terminal receives from now on is the command's output (OSC 133;C).
+    OutputStart {
+        /// The command line that is about to run. The shell sends it
+        /// encoded, and this is the decoded text. Empty if the shell didn't
+        /// send one or it couldn't be decoded.
+        command: &'t [u8],
+    },
+    /// The command finished (OSC 133;D).
+    CommandEnd {
+        /// The exit code the shell reported, or `None` if it didn't report
+        /// one. Exit codes can be negative, for example on Windows.
+        exit_code: Option<i32>,
+        /// A description of what went wrong, or empty if the shell didn't
+        /// send one. Few shells send this; the exit code is the usual way to
+        /// tell whether a command failed.
+        error: &'t [u8],
+    },
+}
+
+impl SemanticPrompt<'_> {
+    /// Returns `None` for an event kind this wrapper doesn't know yet. The C
+    /// header asks callbacks to ignore those.
+    ///
+    /// # Safety
+    ///
+    /// The pointer and its strings must stay valid for `'t`.
+    unsafe fn from_raw(raw: *const ffi::TerminalSemanticPrompt) -> Option<Self> {
+        use ffi::SemanticPromptKind as Kind;
+
+        // SAFETY: Upheld by the caller. Every field read here has been part
+        // of the struct since it was introduced, so `size` only needs to be
+        // checked for fields added later.
+        let raw = unsafe { *raw };
+        Some(match raw.kind {
+            Kind::GHOSTTY_SEMANTIC_PROMPT_PROMPT_START => Self::PromptStart {
+                kind: raw.prompt_kind.try_into().unwrap_or(PromptKind::Primary),
+            },
+            Kind::GHOSTTY_SEMANTIC_PROMPT_INPUT_START => Self::InputStart,
+            Kind::GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START => Self::OutputStart {
+                // SAFETY: Upheld by the caller.
+                command: unsafe { raw.command.to_bytes() },
+            },
+            Kind::GHOSTTY_SEMANTIC_PROMPT_COMMAND_END => Self::CommandEnd {
+                exit_code: raw.has_exit_code.then_some(raw.exit_code),
+                // SAFETY: Upheld by the caller.
+                error: unsafe { raw.error.to_bytes() },
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// The kind of prompt a [`SemanticPrompt::PromptStart`] starts.
+///
+/// Most shells only draw a primary prompt. Some also draw one on the right
+/// side of the line, or at the start of each extra line of a command that
+/// spans several lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(i32)]
+#[non_exhaustive]
+pub enum PromptKind {
+    /// The main prompt shown before each command. Also used when the shell
+    /// doesn't say which prompt it is.
+    Primary = ffi::SemanticPromptPromptKind::GHOSTTY_SEMANTIC_PROMPT_PROMPT_PRIMARY,
+    /// A prompt drawn on the right side of the line, such as zsh's RPROMPT.
+    Right = ffi::SemanticPromptPromptKind::GHOSTTY_SEMANTIC_PROMPT_PROMPT_RIGHT,
+    /// A prompt at the start of an extra line of a command that spans
+    /// several lines.
+    Continuation = ffi::SemanticPromptPromptKind::GHOSTTY_SEMANTIC_PROMPT_PROMPT_CONTINUATION,
+    /// Another prompt for an extra line of input, such as bash's PS2. Shells
+    /// differ in whether they report extra lines as continuation or secondary
+    /// prompts, so most applications should treat the two the same.
+    Secondary = ffi::SemanticPromptPromptKind::GHOSTTY_SEMANTIC_PROMPT_PROMPT_SECONDARY,
+}
+
 //---------------------------------------
 // Callbacks
 //---------------------------------------
@@ -2991,6 +3089,28 @@ handlers! {
         func(term, unsafe { ProgressReport::from_raw(progress) });
     }
 
+    /// Call the given function when the shell reports a step of a command
+    /// through OSC 133: a prompt starts, input starts, output starts, or the
+    /// command ends. See [`SemanticPrompt`] for what each step means.
+    ///
+    /// The terminal has already updated its screen when this is called, so
+    /// e.g. [`Terminal::is_cursor_at_prompt`] reflects the new step. A
+    /// sequence the terminal rejects as malformed is never reported.
+    pub fn on_semantic_prompt(
+        &mut self,
+        tag = SEMANTIC_PROMPT,
+        from = TerminalSemanticPromptFn(
+            event: *const ffi::TerminalSemanticPrompt
+        ),
+        to = <'t>SemanticPromptFn(SemanticPrompt<'t>),
+    ) |term, func| {
+        // SAFETY: The event is only borrowed for the callback duration,
+        // which `SemanticPrompt`'s lifetime enforces.
+        if let Some(event) = unsafe { SemanticPrompt::from_raw(event) } {
+            func(term, event);
+        }
+    }
+
     /// Call the given function once for each complete sequence that
     /// libghostty-vt does not implement. [`UnknownSequence`] is
     /// non-exhaustive, because more kinds of sequences may be reported in
@@ -3324,6 +3444,60 @@ mod tests {
 
         terminal.vt_write(b"\x1b[?1049h");
         assert!(terminal.memory_usage().unwrap().alternate_pages >= 1);
+    }
+
+    /// An owned copy of a semantic prompt event, so it can outlive the
+    /// callback.
+    #[derive(Debug, PartialEq)]
+    enum OwnedPrompt {
+        PromptStart(PromptKind),
+        InputStart,
+        OutputStart(Vec<u8>),
+        CommandEnd(Option<i32>, Vec<u8>),
+    }
+
+    #[test]
+    fn semantic_prompt_reports_osc_133_steps() {
+        let events = RefCell::new(Vec::new());
+        let at_prompt = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(40, 5).expect("terminal should initialize");
+        terminal
+            .on_semantic_prompt(|term, event| {
+                at_prompt.borrow_mut().push(term.is_cursor_at_prompt().ok());
+                events.borrow_mut().push(match event {
+                    SemanticPrompt::PromptStart { kind } => OwnedPrompt::PromptStart(kind),
+                    SemanticPrompt::InputStart => OwnedPrompt::InputStart,
+                    SemanticPrompt::OutputStart { command } => {
+                        OwnedPrompt::OutputStart(command.to_vec())
+                    }
+                    SemanticPrompt::CommandEnd { exit_code, error } => {
+                        OwnedPrompt::CommandEnd(exit_code, error.to_vec())
+                    }
+                });
+            })
+            .expect("callback should register");
+
+        terminal.vt_write(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        terminal.vt_write(b"ls\r\n\x1b]133;C\x07");
+        terminal.vt_write(b"file\r\n\x1b]133;D;2\x07");
+        // A right prompt (k=r), and a command end without an exit code.
+        terminal.vt_write(b"\x1b]133;A;k=r\x07\x1b]133;D\x07");
+
+        assert_eq!(
+            events.take(),
+            [
+                OwnedPrompt::PromptStart(PromptKind::Primary),
+                OwnedPrompt::InputStart,
+                OwnedPrompt::OutputStart(Vec::new()),
+                OwnedPrompt::CommandEnd(Some(2), Vec::new()),
+                OwnedPrompt::PromptStart(PromptKind::Right),
+                OwnedPrompt::CommandEnd(None, Vec::new()),
+            ]
+        );
+        // The terminal is updated before the callback runs: the cursor is at
+        // the prompt when input starts, and no longer once output starts.
+        assert_eq!(at_prompt.borrow()[1], Some(true));
+        assert_eq!(at_prompt.borrow()[2], Some(false));
     }
 
     #[test]
