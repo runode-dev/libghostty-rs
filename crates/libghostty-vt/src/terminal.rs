@@ -2392,6 +2392,79 @@ pub enum ProgressState {
     Pause = ffi::TerminalProgressState::PAUSE,
 }
 
+/// A program status report (OSC 7501), received by the
+/// [`Terminal::on_program_status`] callback.
+///
+/// The strings are borrowed and only valid during the callback. Text the
+/// program didn't send is an empty string.
+#[derive(Debug, Copy, Clone)]
+pub struct ProgramStatus<'t> {
+    ptr: *const ffi::TerminalProgramStatus,
+    _phan: PhantomData<&'t ()>,
+}
+
+impl<'t> ProgramStatus<'t> {
+    unsafe fn from_raw(raw: *const ffi::TerminalProgramStatus) -> Self {
+        Self {
+            ptr: raw,
+            _phan: PhantomData,
+        }
+    }
+
+    /// What the program is doing.
+    pub fn state(self) -> Result<ProgramStatusState> {
+        // SAFETY: The report lives for the callback duration. Every field
+        // read here has been part of the struct since it was introduced.
+        unsafe { *self.ptr }
+            .state
+            .try_into()
+            .map_err(|_| Error::InvalidValue)
+    }
+
+    /// Which record this report is about, or empty for the root record (the
+    /// program itself). A `/` makes one record the child of another, so
+    /// `build/test` is a child of `build`.
+    #[must_use]
+    pub fn id(self) -> &'t str {
+        // SAFETY: The report and its strings live for the callback duration.
+        let bytes = unsafe { (*self.ptr).id.to_bytes() };
+        // libghostty only reports ids made of ASCII letters, digits and
+        // `_.+-/`, so the fallback is unreachable.
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
+
+    /// A stable name for the program that a machine can match on, such as
+    /// `cargo`, or empty when the report didn't include one. It is not a
+    /// label.
+    #[must_use]
+    pub fn app(self) -> &'t str {
+        // SAFETY: The report and its strings live for the callback duration.
+        let bytes = unsafe { (*self.ptr).app.to_bytes() };
+        // As for `id`, libghostty only reports ASCII names here.
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
+}
+
+/// What a program says it is doing in an OSC 7501 report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(i32)]
+#[non_exhaustive]
+pub enum ProgramStatusState {
+    /// Waiting for the user's next instruction.
+    Idle = ffi::ProgramStatusState::IDLE,
+    /// Working on its own.
+    Working = ffi::ProgramStatusState::WORKING,
+    /// Finished something the user hasn't looked at yet.
+    Done = ffi::ProgramStatusState::DONE,
+    /// Needs the user to do something before it can go on.
+    Blocked = ffi::ProgramStatusState::BLOCKED,
+    /// Stopped because something failed.
+    Error = ffi::ProgramStatusState::ERROR,
+    /// Not a state: remove the record with this id and every record beneath
+    /// it, or every record when the id is empty.
+    Clear = ffi::ProgramStatusState::CLEAR,
+}
+
 /// A step of a command reported by shell integration (OSC 133), received by
 /// the [`Terminal::on_semantic_prompt`] callback.
 ///
@@ -3089,6 +3162,33 @@ handlers! {
         func(term, unsafe { ProgressReport::from_raw(progress) });
     }
 
+    /// Call the given function when the running program reports what it is
+    /// doing through OSC 7501, such as working or waiting on the user.
+    ///
+    /// The terminal only answers a program's `OSC 7501 ; ?` support query
+    /// while this callback is installed, and it answers through
+    /// [`on_pty_write`](Self::on_pty_write), so install that too.
+    ///
+    /// The terminal doesn't store reports. Keeping one record per
+    /// [`id`](ProgramStatus::id) and applying
+    /// [`Clear`](ProgramStatusState::Clear) is up to the embedder; the C
+    /// header's `GhosttyTerminalProgramStatusFn` documentation lists the
+    /// rules the specification sets for those records. A full reset (RIS)
+    /// removes every record: the terminal then calls this with a `Clear`
+    /// report and an empty id, followed by [`on_reset`](Self::on_reset).
+    pub fn on_program_status(
+        &mut self,
+        tag = PROGRAM_STATUS,
+        from = TerminalProgramStatusFn(
+            report: *const ffi::TerminalProgramStatus
+        ),
+        to = <'t>ProgramStatusFn(ProgramStatus<'t>),
+    ) |term, func| {
+        // SAFETY: The report is only borrowed for the callback duration,
+        // which `ProgramStatus`'s lifetime enforces.
+        func(term, unsafe { ProgramStatus::from_raw(report) });
+    }
+
     /// Call the given function when the shell reports a step of a command
     /// through OSC 133: a prompt starts, input starts, output starts, or the
     /// command ends. See [`SemanticPrompt`] for what each step means.
@@ -3444,6 +3544,65 @@ mod tests {
 
         terminal.vt_write(b"\x1b[?1049h");
         assert!(terminal.memory_usage().unwrap().alternate_pages >= 1);
+    }
+
+    #[test]
+    fn program_status_reports_osc_7501() {
+        let reports = RefCell::new(Vec::new());
+        let resets = Cell::new(0);
+        let pty = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_program_status(|_, report| {
+                reports.borrow_mut().push((
+                    report.state().ok(),
+                    report.id().to_owned(),
+                    report.app().to_owned(),
+                    // Count the resets seen so far, to check the order below.
+                    resets.get(),
+                ));
+            })
+            .expect("program status callback should register")
+            .on_reset(|_| resets.set(resets.get() + 1))
+            .expect("reset callback should register")
+            .on_pty_write(|_, data| pty.borrow_mut().extend_from_slice(data))
+            .expect("pty write callback should register");
+
+        terminal.vt_write(b"\x1b]7501;state=working:app=cargo\x1b\\");
+        terminal.vt_write(b"\x1b]7501;state=blocked:id=tf/plan\x07");
+        // An invalid id drops the whole report.
+        terminal.vt_write(b"\x1b]7501;state=idle:id=a//b\x07");
+        // A full reset clears every record before `on_reset` runs.
+        terminal.vt_write(b"\x1bc");
+
+        assert_eq!(
+            reports.take(),
+            [
+                (
+                    Some(ProgramStatusState::Working),
+                    String::new(),
+                    "cargo".to_owned(),
+                    0
+                ),
+                (
+                    Some(ProgramStatusState::Blocked),
+                    "tf/plan".to_owned(),
+                    String::new(),
+                    0
+                ),
+                (
+                    Some(ProgramStatusState::Clear),
+                    String::new(),
+                    String::new(),
+                    0
+                ),
+            ]
+        );
+        assert_eq!(resets.get(), 1);
+
+        // The support query is answered once the callback is installed.
+        terminal.vt_write(b"\x1b]7501;?\x1b\\");
+        assert!(!pty.borrow().is_empty());
     }
 
     /// An owned copy of a semantic prompt event, so it can outlive the
