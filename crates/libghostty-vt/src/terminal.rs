@@ -2465,6 +2465,21 @@ pub enum ProgramStatusState {
     Clear = ffi::ProgramStatusState::CLEAR,
 }
 
+/// A request from the running program to resize the window, received by the
+/// [`Terminal::on_resize_window`] callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResizeWindow {
+    /// Resize the window's text area to this many rows and columns
+    /// (CSI 8 ; rows ; columns t). A zero keeps that dimension as it is.
+    Grid {
+        /// Requested height in rows, or 0 to keep the current height.
+        rows: u16,
+        /// Requested width in columns, or 0 to keep the current width.
+        columns: u16,
+    },
+}
+
 /// A step of a command reported by shell integration (OSC 133), received by
 /// the [`Terminal::on_semantic_prompt`] callback.
 ///
@@ -3001,7 +3016,7 @@ handlers! {
     }
 
     /// Call the given function in response to XTWINOPS size queries
-    /// (CSI 14/16/18 t) and when VT input enables in-band size reports (mode
+    /// (CSI 14/16/18/19 t) and when VT input enables in-band size reports (mode
     /// 2048). Return the current terminal geometry, or `None` to suppress the
     /// report.
     pub fn on_size(
@@ -3187,6 +3202,31 @@ handlers! {
         // SAFETY: The report is only borrowed for the callback duration,
         // which `ProgramStatus`'s lifetime enforces.
         func(term, unsafe { ProgramStatus::from_raw(report) });
+    }
+
+    /// Call the given function when the running program asks to resize the
+    /// window, such as with CSI 8 ; rows ; columns t.
+    ///
+    /// The terminal is not resized by this: the embedder decides whether to
+    /// allow the request, and if so resizes its window and the terminal.
+    /// Letting any program resize the window is a nuisance at best, so
+    /// consider making this opt-in for users. Requests of kinds this crate
+    /// doesn't know yet are dropped without calling the function.
+    pub fn on_resize_window(
+        &mut self,
+        tag = RESIZE_WINDOW,
+        from = TerminalResizeWindowFn(
+            request: *const ffi::TerminalResizeWindow
+        ),
+        to = ResizeWindowFn(ResizeWindow),
+    ) |term, func| {
+        // SAFETY: The request lives for the callback duration, and its tag
+        // says which union field holds the value.
+        let request = unsafe { &*request };
+        if request.tag == ffi::TerminalResizeWindowTag::GHOSTTY_TERMINAL_RESIZE_WINDOW_GRID {
+            let grid = unsafe { request.value.grid };
+            func(term, ResizeWindow::Grid { rows: grid.rows, columns: grid.columns });
+        }
     }
 
     /// Call the given function when the shell reports a step of a command
@@ -3544,6 +3584,35 @@ mod tests {
 
         terminal.vt_write(b"\x1b[?1049h");
         assert!(terminal.memory_usage().unwrap().alternate_pages >= 1);
+    }
+
+    #[test]
+    fn resize_window_reports_csi_8_t() {
+        let requests = RefCell::new(Vec::new());
+        let mut terminal = Terminal::new(80, 24).expect("terminal should initialize");
+        terminal
+            .on_resize_window(|_, request| requests.borrow_mut().push(request))
+            .expect("resize window callback should register");
+
+        terminal.vt_write(b"\x1b[8;30;100t");
+        // An omitted parameter keeps that dimension.
+        terminal.vt_write(b"\x1b[8;;120t");
+
+        assert_eq!(
+            requests.take(),
+            [
+                ResizeWindow::Grid {
+                    rows: 30,
+                    columns: 100
+                },
+                ResizeWindow::Grid {
+                    rows: 0,
+                    columns: 120
+                },
+            ]
+        );
+        // The terminal itself is not resized.
+        assert_eq!(terminal.cols().unwrap(), 80);
     }
 
     #[test]
