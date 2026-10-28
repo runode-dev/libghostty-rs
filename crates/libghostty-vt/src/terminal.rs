@@ -344,6 +344,42 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         from_optional_result_with_len(result, stop.consumed)
     }
 
+    /// Write VT-encoded data, stopping right after the first byte that
+    /// reaches one of `boundaries`.
+    ///
+    /// This tells you exactly where an APC, DCS or OSC string starts or
+    /// ends, using the same parse that updates the terminal, so you can find
+    /// a string's bytes without reimplementing the VT state machine. Pass
+    /// the bytes after [`WriteStop::consumed`] in your next call: every byte
+    /// is eventually processed in order, so the terminal ends up as if you
+    /// had called [`Self::vt_write`] with all of it.
+    ///
+    /// After a START stop the string's content begins at the first byte not
+    /// consumed. An END stop consumes the byte that ended the string. A
+    /// string ending in `ESC \` stops after the ESC; the `\` is the first
+    /// byte of the next call.
+    ///
+    /// Returns `None` if all of `data` was consumed without reaching a
+    /// boundary. [`Boundary::GROUND`] is a state, not an event: asking for it
+    /// at ground stops without consuming anything, so don't keep asking for
+    /// it with the same input.
+    ///
+    /// `boundaries` must not be empty, or this gives
+    /// [`Error::InvalidValue`] and consumes nothing.
+    pub fn vt_write_until(&mut self, data: &[u8], boundaries: Boundary) -> Result<Option<WriteStop>> {
+        let mut stop = ffi::sized!(ffi::TerminalWriteStop);
+        let result = unsafe {
+            ffi::ghostty_terminal_vt_write_until(
+                self.inner.as_raw(),
+                data.as_ptr(),
+                data.len(),
+                boundaries.bits(),
+                &raw mut stop,
+            )
+        };
+        from_optional_result(result, WriteStop(stop))
+    }
+
     /// Whether VT processing is at ground.
     ///
     /// See [`Self::vt_write_until_ground`] for what ground means and why it
@@ -1818,6 +1854,120 @@ bitflags::bitflags! {
         /// Use full codepoints instead of the DEC 8-bit values.
         const FULL_CODEPOINTS = 16;
     }
+}
+
+bitflags::bitflags! {
+    /// Points in the VT stream where [`Terminal::vt_write_until`] stops.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Boundary: u32 {
+        /// The stream is not in the middle of any sequence.
+        const GROUND = ffi::TerminalBoundary::GROUND as u32;
+        /// An APC string started.
+        const APC_START = ffi::TerminalBoundary::APC_START as u32;
+        /// An APC string ended.
+        const APC_END = ffi::TerminalBoundary::APC_END as u32;
+        /// A DCS string started. The stop lands on the introducer, before
+        /// the header.
+        const DCS_START = ffi::TerminalBoundary::DCS_START as u32;
+        /// A DCS string ended.
+        const DCS_END = ffi::TerminalBoundary::DCS_END as u32;
+        /// An OSC string started.
+        const OSC_START = ffi::TerminalBoundary::OSC_START as u32;
+        /// An OSC string ended.
+        const OSC_END = ffi::TerminalBoundary::OSC_END as u32;
+    }
+}
+
+/// Where [`Terminal::vt_write_until`] stopped.
+#[derive(Clone, Copy, Debug)]
+pub struct WriteStop(ffi::TerminalWriteStop);
+
+impl WriteStop {
+    /// Bytes consumed, including the byte that reached the boundary. 0 for
+    /// a [`Boundary::GROUND`] stop when the stream was already at ground.
+    #[must_use]
+    pub fn consumed(&self) -> usize {
+        self.0.consumed
+    }
+
+    /// The boundaries the stopping byte reached, only ones that were asked
+    /// for. Usually one, but a byte can end a string and return to ground,
+    /// or end one string and start another.
+    #[must_use]
+    pub fn reached(&self) -> Boundary {
+        Boundary::from_bits_truncate(self.0.reached)
+    }
+
+    /// The kind of string that started or ended. When one byte ends a
+    /// string and starts another, this is the one that ended.
+    ///
+    /// Only meaningful when [`Self::reached`] has a START or END flag. A
+    /// value from a newer libghostty gives [`Error::InvalidValue`].
+    pub fn kind(&self) -> Result<StringKind> {
+        self.0.kind.try_into().map_err(|_| Error::InvalidValue)
+    }
+
+    /// How the string started. Only meaningful when [`Self::reached`] has
+    /// a START flag. A value from a newer libghostty gives
+    /// [`Error::InvalidValue`].
+    pub fn introducer(&self) -> Result<StringIntroducer> {
+        self.0.introducer.try_into().map_err(|_| Error::InvalidValue)
+    }
+
+    /// How the string ended. Only meaningful when [`Self::reached`] has an
+    /// END flag. A value from a newer libghostty gives
+    /// [`Error::InvalidValue`].
+    pub fn end(&self) -> Result<StringEnd> {
+        self.0.end.try_into().map_err(|_| Error::InvalidValue)
+    }
+
+    /// The byte that started or ended the string, such as `]`, 0x9D, ESC or
+    /// BEL. Only meaningful when [`Self::reached`] has a START or END flag.
+    #[must_use]
+    pub fn byte(&self) -> u8 {
+        self.0.byte
+    }
+}
+
+/// The kind of a control string reported by [`WriteStop::kind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(i32)]
+#[non_exhaustive]
+#[expect(missing_docs, reason = "self-explanatory")]
+pub enum StringKind {
+    Apc = ffi::TerminalStringKind::APC,
+    Dcs = ffi::TerminalStringKind::DCS,
+    Osc = ffi::TerminalStringKind::OSC,
+}
+
+/// How a control string started, reported by [`WriteStop::introducer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(i32)]
+#[non_exhaustive]
+pub enum StringIntroducer {
+    /// ESC followed by the introducer byte, such as `ESC ]`.
+    Esc = ffi::TerminalStringIntroducer::ESC,
+    /// A single 8-bit introducer byte, such as 0x9D.
+    C1 = ffi::TerminalStringIntroducer::C1,
+}
+
+/// How a control string ended, reported by [`WriteStop::end`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, int_enum::IntEnum)]
+#[repr(i32)]
+#[non_exhaustive]
+pub enum StringEnd {
+    /// The ESC of the terminator `ESC \`. The `\` is not consumed yet.
+    StEsc = ffi::TerminalStringEnd::ST_ESC,
+    /// The 8-bit terminator 0x9C. Only an APC or a DCS still in its header
+    /// ends this way; inside an OSC 0x9C is content.
+    StC1 = ffi::TerminalStringEnd::ST_C1,
+    /// CAN or SUB cancelled the string. The terminal discards a cancelled
+    /// APC or OSC.
+    Cancelled = ffi::TerminalStringEnd::CANCELLED,
+    /// Another 8-bit control byte cut an APC or a DCS header short.
+    Aborted = ffi::TerminalStringEnd::ABORTED,
+    /// BEL. Only an OSC ends this way.
+    Bel = ffi::TerminalStringEnd::BEL,
 }
 
 /// Color scheme reported in response to a CSI ? 996 n query.
