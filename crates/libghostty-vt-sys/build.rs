@@ -421,8 +421,8 @@ fn emit_include_metadata(include_paths: &[PathBuf]) {
 /// `ReleaseSmall`).
 ///
 /// Defaults to `ReleaseFast` for optimized builds. If `DEBUG` is `true` (as cargo sets for the
-/// `dev` profile), `Debug` mode is used. Otherwise, if `OPT_LEVEL` is `s` or `z`, `ReleaseSmall`
-/// is used.
+/// `dev` profile), `Debug` mode is used, except on `aarch64-pc-windows-msvc`. Otherwise, if
+/// `OPT_LEVEL` is `s` or `z`, `ReleaseSmall` is used.
 fn zig_optimize_mode() -> &'static str {
     if let Ok(override_mode) = env::var("LIBGHOSTTY_VT_SYS_OPTIMIZE") {
         return match override_mode.as_str() {
@@ -436,7 +436,14 @@ fn zig_optimize_mode() -> &'static str {
         };
     }
 
-    if env::var("DEBUG").as_deref() == Ok("true") {
+    // Zig 0.17's std.debug does not compile into an aarch64 MSVC library when stack traces are kept
+    // (Debug and ReleaseSafe): `SelfInfo/Windows.zig` casts an `*anyopaque` to a function pointer,
+    // 4-byte aligned on aarch64, without `@alignCast`.
+    // shortcut: debug builds for aarch64-pc-windows-msvc fall back to ReleaseFast; drop this once
+    // the pinned Zig compiles that file.
+    let aarch64_msvc = env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if env::var("DEBUG").as_deref() == Ok("true") && !aarch64_msvc {
         return "Debug";
     }
 
