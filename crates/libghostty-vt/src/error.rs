@@ -75,6 +75,7 @@ pub(crate) fn from_optional_result_uninit<T>(
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: 0 }),
         ffi::Result::NO_VALUE => Ok(None),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
@@ -89,6 +90,7 @@ pub(crate) fn from_optional_result<T>(code: ffi::Result::Type, v: T) -> Result<O
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: 0 }),
         ffi::Result::NO_VALUE => Ok(None),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
@@ -101,6 +103,7 @@ pub(crate) fn from_result_with_len(code: ffi::Result::Type, len: usize) -> Resul
         ffi::Result::SUCCESS => Ok(len),
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: len }),
+        ffi::Result::NO_VALUE | ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
@@ -117,9 +120,37 @@ pub(crate) fn from_optional_result_with_len(
         ffi::Result::OUT_OF_MEMORY => Err(Error::OutOfMemory),
         ffi::Result::OUT_OF_SPACE => Err(Error::OutOfSpace { required: len }),
         ffi::Result::NO_VALUE => Ok(None),
+        ffi::Result::INVALID_VALUE => Err(Error::InvalidValue),
         ffi::Result::IO_ERROR => Err(Error::IoError),
         ffi::Result::REJECTED => Err(Error::Rejected),
         ffi::Result::LIMIT_EXCEEDED => Err(Error::LimitExceeded),
         _ => Err(Error::Unsupported),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_value_maps_to_invalid_value_in_every_conversion() {
+        let code = ffi::Result::INVALID_VALUE;
+        assert!(matches!(from_result(code), Err(Error::InvalidValue)));
+        assert!(matches!(
+            from_optional_result_uninit(code, MaybeUninit::<u8>::uninit()),
+            Err(Error::InvalidValue)
+        ));
+        assert!(matches!(
+            from_optional_result(code, 0u8),
+            Err(Error::InvalidValue)
+        ));
+        assert!(matches!(
+            from_result_with_len(code, 0),
+            Err(Error::InvalidValue)
+        ));
+        assert!(matches!(
+            from_optional_result_with_len(code, 0),
+            Err(Error::InvalidValue)
+        ));
     }
 }
