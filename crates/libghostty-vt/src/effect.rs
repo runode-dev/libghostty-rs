@@ -24,8 +24,7 @@ use crate::{
     report::{ColorScheme, SizeReportSize},
 };
 
-// Only referenced in docs.
-#[allow(unused)]
+#[cfg_attr(not(test), expect(unused_imports, reason = "only referenced by doc links"))]
 use crate::{Terminal, mode::Mode};
 
 /// You might be wondering just what the heck this is.
@@ -1261,7 +1260,6 @@ impl<'t> ClipboardRead<'t> {
     ///
     /// The values come straight from the program, so they are exposed as
     /// raw bytes.
-    #[must_use]
     pub fn mimes(&self) -> impl ExactSizeIterator<Item = &'t [u8]> + use<'t> {
         // SAFETY: The request lives for the callback duration.
         let (ptr, len) = unsafe { ((*self.ptr).mimes, (*self.ptr).mimes_len) };
@@ -2632,7 +2630,7 @@ mod tests {
         // Exceeding the limit fails the transaction and never reaches the callback.
         let (output, written) = run(4);
         assert_eq!(output, b"\x1b]5522;type=write:status=EFBIG:id=c1\x1b\\");
-        assert!(written.is_empty());
+        assert_eq!(written, [] as [Vec<u8>; 0]);
 
         let (output, written) = run(5);
         assert_eq!(output, b"\x1b]5522;type=write:status=DONE:id=c1\x1b\\");
@@ -3038,7 +3036,7 @@ mod tests {
                 message: b"Apply?".to_vec(),
             }]
         );
-        assert!(output.is_empty());
+        assert_eq!(output, [] as [u8; 0]);
     }
 
     #[test]
@@ -3106,8 +3104,8 @@ mod tests {
         // An unknown state and a bad id each discard the whole report.
         let (seen, output) =
             program_status(b"\x1b]7501;state=sleeping\x07\x1b]7501;state=idle:id=a//b\x07");
-        assert!(seen.is_empty());
-        assert!(output.is_empty());
+        assert_eq!(seen, [] as [SeenStatus; 0]);
+        assert_eq!(output, [] as [u8; 0]);
     }
 
     #[test]
@@ -3159,7 +3157,7 @@ mod tests {
         // The reply uses the same terminator as the query, and the query
         // itself is not a report.
         let (seen, output) = program_status(b"\x1b]7501;?\x1b\\\x1b]7501;?\x07");
-        assert!(seen.is_empty());
+        assert_eq!(seen, [] as [SeenStatus; 0]);
         assert_eq!(output, [REPLY, b"\x1b\\", REPLY, b"\x07"].concat());
 
         // Without the callback the query goes unanswered, so the program
@@ -3171,7 +3169,7 @@ mod tests {
             .unwrap();
         terminal.vt_write(b"\x1b]7501;?\x1b\\");
         drop(terminal);
-        assert!(output.into_inner().is_empty());
+        assert_eq!(output.into_inner(), [] as [u8; 0]);
     }
 
     /// What a semantic prompt callback observed about one event, copied out
