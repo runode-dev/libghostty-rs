@@ -20,7 +20,7 @@
     };
     ghostty = {
       # vt-1.0.1, pinned by commit so tag changes cannot alter the source.
-      url = "github:ghostty-org/ghostty/108cacb17ed8990840cd14abfce43d8ed8503ca1";
+      url = "github:ghostty-org/ghostty/7fa26e8b675f3248975479d88274c937d7e63905";
     };
   };
 
@@ -97,7 +97,7 @@
         ghosttyLib =
           if pkgs.stdenv.isDarwin
           then
-            assert ghostty.rev == "108cacb17ed8990840cd14abfce43d8ed8503ca1";
+            assert ghostty.rev == "7fa26e8b675f3248975479d88274c937d7e63905";
               pkgs.runCommand "libghostty-vt-1.0.1-macos" {
                 src = pkgs.fetchurl {
                   url = "https://release.files.ghostty.org/libghostty-vt/1.0.1/ghostty-vt-1.0.1.xcframework.zip";
