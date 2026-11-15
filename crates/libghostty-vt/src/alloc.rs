@@ -40,6 +40,7 @@ impl Allocator<'_> {
     ///
     /// `raw` must point to a valid allocator, and the state behind its
     /// context pointer must outlive the result.
+    #[cfg(any(all(test, not(miri)), feature = "kitty-graphics"))]
     pub(crate) unsafe fn from_raw(raw: *const ffi::Allocator) -> Self {
         Self {
             inner: unsafe { *raw },
@@ -70,12 +71,14 @@ impl<T> Object<'_, T> {
 }
 
 /// Borrowed version of `Object`.
+#[cfg(feature = "kitty-graphics")]
 #[derive(Debug)]
 pub(crate) struct Ref<'a, T> {
     pub(crate) ptr: NonNull<T>,
     _phan: PhantomData<&'a ()>,
 }
 
+#[cfg(feature = "kitty-graphics")]
 impl<T> Ref<'_, T> {
     pub(crate) fn new(raw: *mut T) -> Result<Self> {
         let ptr = NonNull::new(raw).ok_or(Error::OutOfMemory)?;
@@ -140,6 +143,7 @@ impl<'alloc> Bytes<'alloc> {
 
     /// The allocator these bytes will be freed with, as passed to
     /// libghostty (NULL for the default allocator).
+    #[cfg(feature = "kitty-graphics")]
     pub(crate) fn allocator(&self) -> *const ffi::Allocator {
         self.alloc
     }
@@ -315,10 +319,10 @@ impl<'ctx, A: alloc::Allocator> From<&'ctx A> for Allocator<'ctx> {
                     .cast_mut()
                     .cast::<std::ffi::c_void>(),
                 vtable: &ffi::AllocatorVtable {
-                    alloc: Some(_alloc::<A>),
-                    free: Some(_free::<A>),
-                    resize: Some(_resize),
-                    remap: Some(_remap::<A>),
+                    alloc: Some(adapted_alloc::<A>),
+                    free: Some(adapted_free::<A>),
+                    resize: Some(adapted_resize),
+                    remap: Some(adapted_remap::<A>),
                     reserved: [std::ptr::null_mut(); 4],
                 },
             },
@@ -328,7 +332,11 @@ impl<'ctx, A: alloc::Allocator> From<&'ctx A> for Allocator<'ctx> {
 }
 
 #[cfg(feature = "allocator_api")]
-unsafe extern "C" fn _alloc<A: alloc::Allocator>(
+#[expect(
+    clippy::incompatible_msrv,
+    reason = "the allocator_api feature requires Rust 1.100, checked at compile time"
+)]
+unsafe extern "C" fn adapted_alloc<A: alloc::Allocator>(
     allocator: *mut c_void,
     len: usize,
     alignment: u8,
@@ -342,7 +350,11 @@ unsafe extern "C" fn _alloc<A: alloc::Allocator>(
 }
 
 #[cfg(feature = "allocator_api")]
-unsafe extern "C" fn _free<A: alloc::Allocator>(
+#[expect(
+    clippy::incompatible_msrv,
+    reason = "the allocator_api feature requires Rust 1.100, checked at compile time"
+)]
+unsafe extern "C" fn adapted_free<A: alloc::Allocator>(
     allocator: *mut c_void,
     mem: *mut c_void,
     len: usize,
@@ -368,7 +380,7 @@ unsafe extern "C" fn _free<A: alloc::Allocator>(
 /// resizing operation might relocate the memory block, so in-place
 /// resizes are always impossible.
 #[cfg(feature = "allocator_api")]
-unsafe extern "C" fn _resize(
+unsafe extern "C" fn adapted_resize(
     _allocator: *mut c_void,
     _mem: *mut c_void,
     _old_len: usize,
@@ -382,7 +394,11 @@ unsafe extern "C" fn _resize(
 /// Resize (grow or shrink) an allocation, *allowing relocation if necessary*,
 /// returning `null` if resizing requires reallocation.
 #[cfg(feature = "allocator_api")]
-unsafe extern "C" fn _remap<A: alloc::Allocator>(
+#[expect(
+    clippy::incompatible_msrv,
+    reason = "the allocator_api feature requires Rust 1.100, checked at compile time"
+)]
+unsafe extern "C" fn adapted_remap<A: alloc::Allocator>(
     allocator: *mut c_void,
     mem: *mut c_void,
     old_len: usize,
