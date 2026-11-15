@@ -1,5 +1,9 @@
-//! Handling various protocols pioneered by Kitty,
-//! including the [Kitty graphics protocol](graphics).
+//! Handling various protocols pioneered by Kitty.
+#![cfg_attr(
+    feature = "kitty-graphics",
+    doc = "",
+    doc = "This includes the [Kitty graphics protocol](graphics)."
+)]
 
 pub mod graphics;
 

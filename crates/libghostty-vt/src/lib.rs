@@ -47,8 +47,11 @@
 //!
 //! - [Render State](crate::render) - Find out what changed since the last frame
 //!   and read the rows and cells to draw
-//! - [Kitty Graphics](crate::kitty::graphics) - Read the images that programs
-//!   send with the Kitty graphics protocol
+#![cfg_attr(
+    feature = "kitty-graphics",
+    doc = "- [Kitty Graphics](crate::kitty::graphics) - Read the images that programs",
+    doc = "  send with the Kitty graphics protocol"
+)]
 //!
 //! ## Input
 //!
