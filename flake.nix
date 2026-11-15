@@ -19,7 +19,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     ghostty = {
-      # vt-1.0.1, pinned by commit so tag changes cannot alter the source.
+      # Pinned by commit so tag changes cannot alter the source.
       url = "github:ghostty-org/ghostty/7fa26e8b675f3248975479d88274c937d7e63905";
     };
   };
@@ -92,36 +92,37 @@
         ghosttySourceLib = ghostty.packages.${system}.libghostty-vt;
         # The release contains a universal macOS archive, but no dylib. Keep
         # the upstream derivation for dynamic-link coverage and use the signed
-        # release's checksum for ordinary static builds. Tie it to the source
-        # pin so a later bindings bump cannot silently use an older archive.
+        # release's checksum for ordinary static builds. The archive is only
+        # used while the source pin is the release commit; any other pin
+        # builds from source so the bindings never link an older archive.
+        releaseRev = "108cacb17ed8990840cd14abfce43d8ed8503ca1";
         ghosttyLib =
-          if pkgs.stdenv.isDarwin
+          if pkgs.stdenv.isDarwin && ghostty.rev == releaseRev
           then
-            assert ghostty.rev == "7fa26e8b675f3248975479d88274c937d7e63905";
-              pkgs.runCommand "libghostty-vt-1.0.1-macos" {
-                src = pkgs.fetchurl {
-                  url = "https://release.files.ghostty.org/libghostty-vt/1.0.1/ghostty-vt-1.0.1.xcframework.zip";
-                  sha256 = "sha256-wPljEnf3JhVMj1IZVNF83EGqxGJvwN+M+SWhnuWOgps=";
-                };
-                nativeBuildInputs = [pkgs.unzip];
-              } ''
-                unzip -q "$src"
-                slice=ghostty-vt.xcframework/macos-arm64_x86_64
-                mkdir -p "$out/lib/pkgconfig"
-                cp "$slice/libghostty-vt.a" "$out/lib/"
-                cp -R "$slice/Headers" "$out/include"
-                cat > "$out/lib/pkgconfig/libghostty-vt-static.pc" <<EOF
-                prefix=$out
-                libdir=\''${prefix}/lib
-                includedir=\''${prefix}/include
+            pkgs.runCommand "libghostty-vt-1.0.1-macos" {
+              src = pkgs.fetchurl {
+                url = "https://release.files.ghostty.org/libghostty-vt/1.0.1/ghostty-vt-1.0.1.xcframework.zip";
+                sha256 = "sha256-wPljEnf3JhVMj1IZVNF83EGqxGJvwN+M+SWhnuWOgps=";
+              };
+              nativeBuildInputs = [pkgs.unzip];
+            } ''
+              unzip -q "$src"
+              slice=ghostty-vt.xcframework/macos-arm64_x86_64
+              mkdir -p "$out/lib/pkgconfig"
+              cp "$slice/libghostty-vt.a" "$out/lib/"
+              cp -R "$slice/Headers" "$out/include"
+              cat > "$out/lib/pkgconfig/libghostty-vt-static.pc" <<EOF
+              prefix=$out
+              libdir=\''${prefix}/lib
+              includedir=\''${prefix}/include
 
-                Name: libghostty-vt-static
-                Description: Ghostty VT library (static)
-                Version: 1.0.1
-                Libs: -L\''${libdir} -lghostty-vt
-                Cflags: -I\''${includedir}
-                EOF
-              ''
+              Name: libghostty-vt-static
+              Description: Ghostty VT library (static)
+              Version: 1.0.1
+              Libs: -L\''${libdir} -lghostty-vt
+              Cflags: -I\''${includedir}
+              EOF
+            ''
           else ghosttySourceLib;
 
         miriCommand = pkgs.writeShellApplication {
