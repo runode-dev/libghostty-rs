@@ -84,7 +84,7 @@
         # Ghostty patches Zig 0.17 so cross-compiling C sources for iOS does
         # not instantiate process spawning code iOS lacks. Take the patch from
         # the pinned ghostty input so it tracks the version we build against.
-        zigPkg = zig.packages.${system}."0.17.0".overrideAttrs (previousAttrs: {
+        zigPkg = zig.packages.${system}."0.17.1".overrideAttrs (previousAttrs: {
           patches =
             (previousAttrs.patches or [])
             ++ ["${ghostty}/nix/patches/zig-0.17-ios-process-replace.patch"];

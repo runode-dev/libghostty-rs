@@ -59,7 +59,7 @@ Cargo's `rust-version` remains `1.96` because Cargo cannot declare a separate
 MSRV for an optional feature; enabling `allocator_api` on an older compiler
 produces a compile-time error.
 
-Requires [Zig](https://ziglang.org/) 0.17.x on PATH, or selected through `ZIG`.
+Requires [Zig](https://ziglang.org/) 0.17.1 or a later 0.17.x on PATH, or selected through `ZIG`.
 Set `ZIG` to an executable path or command name, without arguments, to override
 the default `zig` executable. By default, the ghostty source is fetched
 automatically at build time from the pinned commit in `build.rs`.
