@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/*"]
+# Listed explicitly rather than as a `*` glob: Dependabot, run on a repository
+# that vendors this workspace as a path dependency, expands a glob against that
+# repository's root instead of this directory and aborts on the crates it finds
+# there.
+members = ["crates/libghostty-vt", "crates/libghostty-vt-sys"]
 resolver = "2"
 
 [workspace.package]
